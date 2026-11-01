@@ -20,7 +20,12 @@ if [ ! -f "$SCOPE" ]; then
     exit 1
 fi
 
-PROGRAM=$(basename "$SCOPE" .txt)
+# Sanitize scope file (PowerShell writes UTF-16/BOM — strip it)
+CLEAN_SCOPE=$(mktemp)
+LC_ALL=C sed "1s/^\xef\xbb\xbf//" "$SCOPE" | sed 's/\r$//' | tr -d '\0' > "$CLEAN_SCOPE"
+SCOPE="$CLEAN_SCOPE"
+
+PROGRAM=$(basename "$1" .txt)
 TS=$(date +%Y%m%d-%H%M%S)
 OUT="/data/${PROGRAM}/${TS}"
 mkdir -p "$OUT"/{wayback,gau,whatweb,wafw00f,dns,whois,crtsh,theharvester,shodan,merged}

@@ -1,3 +1,5 @@
+![Atalaya — pre-hunt OSINT intelligence](docs/banner.png)
+
 # Atalaya
 
 > *La atalaya otea el horizonte antes de que el vigía suba a la cofa.*
