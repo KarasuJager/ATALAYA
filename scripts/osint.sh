@@ -26,6 +26,11 @@ LC_ALL=C sed "1s/^\xef\xbb\xbf//" "$SCOPE" | sed 's/\r$//' | tr -d '\0' > "$CLEA
 SCOPE="$CLEAN_SCOPE"
 
 PROGRAM=$(basename "$1" .txt)
+# Identificación del tráfico activo (whatweb, wafw00f). Pasivo (crt.sh, wayback, gau, whois, dns) no lleva.
+HANDLE="${HANDLE:-researcher}"
+UA="${UA_OVERRIDE:-bugbounty-${HANDLE}}"
+HDRS=$(mktemp); printf 'User-Agent: %s\nX-Bug-Bounty: %s\n' "$UA" "$HANDLE" > "$HDRS"
+echo " UA: $UA"
 TS=$(date +%Y%m%d-%H%M%S)
 OUT="/data/${PROGRAM}/${TS}"
 mkdir -p "$OUT"/{wayback,gau,whatweb,wafw00f,dns,whois,crtsh,theharvester,shodan,merged}
@@ -118,7 +123,7 @@ echo "════════════════════════�
 for root in $ROOTS; do
     for proto in https http; do
         echo "  → ${proto}://${root}"
-        whatweb --color=never -a 3 "${proto}://${root}" \
+        whatweb --color=never -a 3 -U "$UA" -H "X-Bug-Bounty:${HANDLE}" "${proto}://${root}" \
             --log-json "$OUT/whatweb/${root}-${proto}.json" \
             2>/dev/null || true
     done
@@ -130,7 +135,7 @@ echo " [7/8] wafw00f (WAF Detection)"
 echo "══════════════════════════════════════════"
 for root in $ROOTS; do
     echo "  → $root"
-    wafw00f -a "https://${root}" -o "$OUT/wafw00f/${root}.json" -f json \
+    wafw00f -a "https://${root}" -H "$HDRS" -o "$OUT/wafw00f/${root}.json" -f json \
         2>/dev/null || true
 done
 echo ""

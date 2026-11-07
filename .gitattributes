@@ -1,0 +1,3 @@
+# Scripts siempre en LF aunque se clonen en Windows (bash en Docker falla con CRLF)
+*.sh text eol=lf
+*.py text eol=lf
