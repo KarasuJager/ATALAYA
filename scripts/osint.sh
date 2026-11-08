@@ -62,6 +62,20 @@ for root in $ROOTS; do
     echo "    $COUNT subdomains from certificates"
     sleep 1
 done
+# Si el scope son hosts concretos (app-staging.x.com), consultar también el dominio registrable (x.com)
+# en crt.sh: es PASIVO (no toca el target) y descubre hermanos (*-staging) que luego filtra el scope-guard.
+PARENTS=$(for r in $ROOTS; do echo "$r" | awk -F. 'NF>2{print $(NF-1)"."$NF}'; done | sort -u)
+for parent in $PARENTS; do
+    echo "$ROOTS" | grep -qx "$parent" && continue
+    echo "  → $parent (dominio registrable, pasivo)"
+    curl -s "https://crt.sh/?q=%25.${parent}&output=json" 2>/dev/null \
+        | jq -r '.[].name_value' 2>/dev/null \
+        | sed 's/\*\.//g' \
+        | sort -u > "$OUT/crtsh/${parent}.parent.txt" || true
+    COUNT=$(wc -l < "$OUT/crtsh/${parent}.parent.txt" 2>/dev/null || echo 0)
+    echo "    $COUNT subdomains from certificates (candidatos: el scope decide)"
+    sleep 1
+done
 echo ""
 
 echo "══════════════════════════════════════════"
@@ -95,14 +109,42 @@ for root in $ROOTS; do
 done
 echo ""
 
+# Estado de las fuentes históricas: "0 URLs" no es lo mismo que "la fuente no respondió".
+# Se escribe merged/_sources-status.txt (host | fuente | ok N / FAILED motivo) para que el bridge/Capitán
+# no lean un fallo de archive.org como "este host no tiene historial". (Caída del CDX de Wayback, 8-nov-2026.)
+STATUS="$OUT/merged/_sources-status.txt"
+: > "$STATUS"
+
+# fetch_hist <fuente> <root> <fichero> <timeout_s> <intentos> -- <comando...>
+# Reintenta con espera creciente si el comando falla/expira. Solo cuenta como OK si salió con 0.
+fetch_hist() {
+    local src="$1" root="$2" out="$3" tmo="$4" tries="$5"; shift 5
+    local err="${out%.txt}.err" n=1 rc=1
+    while [ $n -le "$tries" ]; do
+        echo "$root" | timeout "$tmo" "$@" > "$out" 2> "$err"; rc=$?
+        # waybackurls/gau devuelven 0 aunque la fuente falle: 0 líneas + algo en stderr = fallo
+        if [ $rc -eq 0 ] && [ ! -s "$out" ] && [ -s "$err" ]; then rc=99; fi
+        [ $rc -eq 0 ] && break
+        [ $n -lt "$tries" ] && { echo "    [$src] intento $n falló (rc=$rc), reintento en $((n*30))s..."; sleep $((n*30)); }
+        n=$((n+1))
+    done
+    local count; count=$(wc -l < "$out" 2>/dev/null || echo 0)
+    if [ $rc -eq 0 ]; then
+        echo "$root | $src | ok $count" >> "$STATUS"; rm -f "$err"
+        echo "    $count URLs ($src)"
+    else
+        local why; why=$(tail -c 200 "$err" 2>/dev/null | tr '\n' ' '); [ $rc -eq 124 ] && why="timeout ${tmo}s $why"
+        echo "$root | $src | FAILED rc=$rc ${why}" >> "$STATUS"
+        echo "    $count URLs ($src) — FUENTE CAÍDA/sin respuesta (rc=$rc), no significa que no haya historial"
+    fi
+}
+
 echo "══════════════════════════════════════════"
 echo " [4/8] Wayback URLs"
 echo "══════════════════════════════════════════"
 for root in $ROOTS; do
     echo "  → $root"
-    echo "$root" | waybackurls > "$OUT/wayback/${root}.txt" 2>/dev/null || true
-    COUNT=$(wc -l < "$OUT/wayback/${root}.txt" 2>/dev/null || echo 0)
-    echo "    $COUNT historical URLs"
+    fetch_hist wayback "$root" "$OUT/wayback/${root}.txt" 180 3 waybackurls
 done
 echo ""
 
@@ -111,10 +153,11 @@ echo " [5/8] GAU (GetAllUrls)"
 echo "══════════════════════════════════════════"
 for root in $ROOTS; do
     echo "  → $root"
-    echo "$root" | gau --threads 3 > "$OUT/gau/${root}.txt" 2>/dev/null || true
-    COUNT=$(wc -l < "$OUT/gau/${root}.txt" 2>/dev/null || echo 0)
-    echo "    $COUNT URLs from all sources"
+    fetch_hist gau "$root" "$OUT/gau/${root}.txt" 900 2 gau --threads 3
 done
+echo ""
+FAILED=$(grep -c FAILED "$STATUS" 2>/dev/null || echo 0)
+[ "$FAILED" -gt 0 ] && echo "  [!] $FAILED consultas históricas fallaron — ver merged/_sources-status.txt"
 echo ""
 
 echo "══════════════════════════════════════════"
