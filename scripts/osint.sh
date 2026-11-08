@@ -29,7 +29,8 @@ PROGRAM=$(basename "$1" .txt)
 # Identificación del tráfico activo (whatweb, wafw00f). Pasivo (crt.sh, wayback, gau, whois, dns) no lleva.
 HANDLE="${HANDLE:-researcher}"
 UA="${UA_OVERRIDE:-bugbounty-${HANDLE}}"
-HDRS=$(mktemp); printf 'User-Agent: %s\nX-Bug-Bounty: %s\n' "$UA" "$HANDLE" > "$HDRS"
+IDENT_HEADER="${IDENT_HEADER:-X-Bug-Bounty}"
+HDRS=$(mktemp); printf 'User-Agent: %s\n%s: %s\n' "$UA" "$IDENT_HEADER" "$HANDLE" > "$HDRS"
 echo " UA: $UA"
 TS=$(date +%Y%m%d-%H%M%S)
 OUT="/data/${PROGRAM}/${TS}"
@@ -166,7 +167,7 @@ echo "════════════════════════�
 for root in $ROOTS; do
     for proto in https http; do
         echo "  → ${proto}://${root}"
-        whatweb --color=never -a 3 -U "$UA" -H "X-Bug-Bounty:${HANDLE}" "${proto}://${root}" \
+        whatweb --color=never -a 3 -U "$UA" -H "${IDENT_HEADER}:${HANDLE}" "${proto}://${root}" \
             --log-json "$OUT/whatweb/${root}-${proto}.json" \
             2>/dev/null || true
     done
