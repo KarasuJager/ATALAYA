@@ -3,3 +3,4 @@ runs/
 .env
 .DS_Store
 Thumbs.db
+scope/*.txt
