@@ -172,20 +172,47 @@ def prepare_js(run_dir, vigia_js, scope, work):
     return n
 
 
+# Librerías de terceros: sus sinks/listeners no son del target (ej.: ShareThis, flashembed, zone.js…).
+LIB_NOISE = ["sharethis", "stlib.", "flashembed", "polyfills", "zone.js", "window-post-message-proxy",
+             "http-post-message", "jquery.tools", "swfobject", "_next/static/chunks/pages/signin"]
+
+
 def explore_sinks(run_dir, out, vigia_js=None, scope=None):
     if not shutil.which("semgrep"):
         log("[sinks] semgrep no instalado"); return []
     work = Path(tempfile.mkdtemp(prefix="sg-"))
     n = prepare_js(run_dir, vigia_js, scope, work)
+    html = 0
+    for f in list(work.rglob("*")):
+        try:
+            if f.is_file() and f.open("rb").read(200).lstrip()[:1] == b"<":
+                f.unlink(); html += 1
+        except Exception:
+            pass
+    if html:
+        log(f"[sinks] {html} ficheros eran HTML, no JS (archivados) → descartados")
     if not sum(v for k, v in n.items() if k != "vigia_terceros"):
         log("[sinks] no hay JS que analizar (sourcemaps, archived-js o VIGÍA en scope)"); return []
-    cmd = ["semgrep", "--config", str(RULES), "--json", "--metrics=off", "--quiet", "--timeout", "60",
-           "--max-target-bytes", "6000000", "--no-git-ignore", str(work)]
-    rc, so, se = run(cmd, timeout=3600)
-    try:
-        d = json.loads(so or "{}")
-    except Exception:
-        log(f"[sinks] salida de semgrep ilegible (rc={rc}): {se[:300]}"); return []
+    # Por tandas: un bundle enorme ya no tumba todo el análisis (OOM 15-nov con turbopack de Next.js).
+    files = sorted(str(f) for f in work.rglob("*") if f.is_file())
+    BATCH = int(os.environ.get("EXPLORE_SG_BATCH", "25"))
+    d = {"results": [], "errors": []}
+    nb = (len(files) + BATCH - 1) // BATCH
+    for i in range(0, len(files), BATCH):
+        chunk = files[i:i + BATCH]
+        cmd = ["semgrep", "--config", str(RULES), "--json", "--metrics=off", "--quiet", "-j", "2",
+               "--timeout", "30", "--timeout-threshold", "2", "--max-memory", "2000",
+               "--max-target-bytes", "3000000", "--no-git-ignore"] + chunk
+        rc, so, se = run(cmd, timeout=900)
+        try:
+            dj = json.loads(so or "{}")
+        except Exception:
+            dj = {"errors": [{"type": "SalidaIlegible", "message": f"rc={rc} {se[:300]}", "batch": chunk}]}
+        d["results"] += dj.get("results", [])
+        for e in dj.get("errors", []):
+            e.setdefault("batch_first", chunk[0].replace(str(work) + "/", ""))
+            d["errors"].append(e)
+        log(f"[sinks] tanda {i // BATCH + 1}/{nb}: {len(dj.get('results', []))} resultados · {len(dj.get('errors', []))} errores")
     errs = d.get("errors", [])
     if errs:
         wjson(out / "semgrep-errors.json", errs)
@@ -208,14 +235,19 @@ def explore_sinks(run_dir, out, vigia_js=None, scope=None):
             item["origin_checked"] = bool(re.search(r"\.origin\b", body))
             if item["origin_checked"]:
                 item["nota"] = "comprueba event.origin (revisar si la comprobación es débil: indexOf/regex)"
+        lib = next((l for l in LIB_NOISE if l in path or l in snippet), None)
+        if lib:
+            item["ruido_libreria"] = lib
         found.append(item)
     # orden: flujos taint primero, luego listeners sin origin, luego el resto
-    rank = lambda i: (0 if "to-sink" in i["rule"] else 1 if (i["rule"] == "aegir-postmessage-listener" and not i.get("origin_checked")) else 2)
+    rank = lambda i: (3 if i.get("ruido_libreria") else 0 if "to-sink" in i["rule"] else 1 if (i["rule"] == "aegir-postmessage-listener" and not i.get("origin_checked")) else 2)
     found.sort(key=rank)
     shutil.rmtree(work, ignore_errors=True)
     wjson(out / "sinks.json", found)
-    log(f"[sinks] {sum(1 for f in found if 'to-sink' in f['rule'])} flujos fuente→sink · "
-        f"{sum(1 for f in found if f['rule']=='aegir-postmessage-listener' and not f.get('origin_checked'))} listeners postMessage sin origin · "
+    real = [f for f in found if not f.get("ruido_libreria")]
+    log(f"[sinks] {sum(1 for f in real if 'to-sink' in f['rule'])} flujos fuente→sink · "
+        f"{sum(1 for f in real if f['rule']=='aegir-postmessage-listener' and not f.get('origin_checked'))} listeners postMessage sin origin · "
+        f"{len(found) - len(real)} de librerías de terceros (al final de sinks.json) · "
         f"errores semgrep: {len(errs)}")
     return found
 
