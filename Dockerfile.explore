@@ -1,0 +1,18 @@
+# ============================================================
+# Atalaya — Exploradores (Capa 1 de AEGIR): hosts (regulator + subwiz), sinks (Semgrep taint), rutas hermanas.
+# Imagen aparte para no inflar la de Atalaya: PyTorch + el modelo de subwiz pesan ~1-2 GB.
+# Necesita antes la imagen base:  docker compose build osint
+# ============================================================
+FROM atalaya-osint:latest
+
+# PyTorch solo-CPU (mucho más ligero que el de CUDA) + subwiz (modelo de IA local para predecir subdominios)
+RUN pip install --break-system-packages --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --break-system-packages --no-cache-dir subwiz semgrep
+
+# regulator (aprende patrones de nombres de host) + sus dependencias
+RUN git clone --depth 1 https://github.com/cramppet/regulator.git /opt/regulator && \
+    pip install --break-system-packages --no-cache-dir dank datrie dnspython tldextract editdistance
+
+# El modelo de subwiz se descarga de Hugging Face la primera vez y se guarda en este volumen de caché
+ENV HF_HOME=/cache/hf
+ENTRYPOINT ["python3", "/app/explore/run_explore.py"]

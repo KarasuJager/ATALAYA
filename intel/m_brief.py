@@ -27,6 +27,97 @@ CLASS_HINTS = [
 ]
 
 
+# ---------------------------------------------------------------- AEGIR 3.0: dónde probar cada ancla
+CDN_CNAME = re.compile(r"(?i)(cloudfront\.net|akamai(edge)?\.net|edgekey\.net|edgesuite\.net|fastly\.net|incapdns\.net|"
+                       r"impervadns\.net|cloudflare\.net|cdn\.cloudflare|azureedge\.net|azurefd\.net|footprint\.net|stackpathdns)")
+CDN_TECH = re.compile(r"(?i)(cloudflare|incapsula|imperva|akamai|cloudfront|fastly|varnish)")
+CDN_IP = ("45.60.", "45.223.", "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "172.64.", "172.67.",
+          "23.235.", "151.101.", "199.232.")                               # Imperva, Cloudflare, Fastly (rangos comunes)
+SESSION_HOST = re.compile(r"(?i)(^|[.-])(my|account|accounts|portal|servicecentre|service|app|apply|dashboard|customer|"
+                          r"client|online|secure|member|merchant|partner|admin|cards?)([.-]|$)")
+MONEY = re.compile(r"(?i)(pay|payment|checkout|cart|order|refund|loan|credit|limit|coupon|promo|voucher|reward|points|"
+                   r"wallet|balance|transfer|direct-?debit|statement|bank|bff|webhook|callback|apply|application)")
+IDISH = re.compile(r"(?i)(\{id\}|/\d{3,}(/|$|\?)|[0-9a-f]{8}-[0-9a-f]{4}-|[?&][a-z_]*id=)")
+
+
+def host_in(u, final):
+    h = u.split("://", 1)[-1].split("/", 1)[0].split("?")[0].lower()
+    return h in final or any(k.startswith("*.") and h.endswith(k[1:]) for k in final)
+
+
+def cdn_of(info):
+    for c in info.get("cname") or []:
+        if CDN_CNAME.search(c):
+            return CDN_CNAME.search(c).group(1)
+    for t in info.get("tech") or []:
+        if CDN_TECH.search(str(t)):
+            return CDN_TECH.search(str(t)).group(1)
+    for ip in info.get("ips") or []:
+        if ip.startswith(CDN_IP):
+            return "CDN (por IP)"
+    return ""
+
+
+def anchors_section(out, final, x):
+    """Reparte lo que ya tenemos entre las 4 clases ancla. Todo son candidatos, no hallazgos."""
+    from common import rlines, rjson
+    jl = x.get("jsluice") or []
+    hist_api = rlines(out / "history" / "api-routes.txt")
+    idor_hist = rlines(out / "history" / "idor-candidates.txt")
+    urls = [r["url"] for r in jl] + hist_api
+    noise = lambda u: bool(re.search(r"(?i)(\.(html?|js|css|png|jpe?g|svg|pdf)(\?|$)|/wp-(json|content|admin)\b|#)", u))
+    sdk = lambda u: noise(u) or bool(sdk_of(u if u.startswith("/") else ("/" + u.split("://", 1)[-1].split("/", 1)[-1] if "/" in u.split("://", 1)[-1] else "")))
+    A = {}
+    # IDOR
+    idor = [u for u in dict.fromkeys(idor_hist + [u for u in urls if IDISH.search(u)])
+            if not sdk(u) and (u.startswith("/") or (u.startswith("http") and host_in(u, final)))]
+    idor.sort(key=lambda u: (not re.search(r"(?i)(dev|test|uat|stag|sandbox|-np)", u), not re.search(r"(?i)/(api|v\d)", u)))
+    exp_routes = rjson(out.parent / "explore" / "routes.json") or []
+    idor += [f"{r['route']} (deducida: {r['why'][0]})" for r in exp_routes if "{id}" in r.get("route", "")][:4]
+    A["IDOR / BOLA"] = (idor[:8], "rutas con IDs vistas sin sesión (pocas a propósito: los IDs buenos salen con sesión → "
+                                  "tráfico de A y B con traffic_to_flow). Probar con cuentas A y B (ficha 1)")
+    # Business logic
+    money = [u for u in dict.fromkeys(u for u in urls if MONEY.search(u) and not sdk(u))]
+    money.sort(key=lambda u: (not re.search(r"(?i)(dev|test|uat|stag|sandbox|-np)", u), not re.search(r"(?i)(bff|webhook|callback|limit|refund)", u)))
+    orgs = x.get("github_org_candidates") or []
+    A["Business logic"] = (money[:8] + [f"código público: github.com/{o}" for o in orgs[:3]],
+                           "procesos de dinero/crédito: hacerlos enteros con A y B en Burp → traffic_to_flow (ficha 2)")
+    # WCD
+    wcd = []
+    dangling = {t["host"] for t in (x.get("dangling") or [])}
+    for h, info in final.items():
+        if "*" in h or info.get("dns") == "dead" or h in dangling:
+            continue
+        c = cdn_of(info)
+        if c and SESSION_HOST.search(h):
+            wcd.append(f"{h} — detrás de {c}")
+    wcd.sort(key=lambda s: (not re.search(r"(?i)(dev|test|uat|stag|sandbox|-np)", s), s))
+    A["Web cache deception"] = (wcd[:8], "área de cliente detrás de CDN: probar /cuenta/x.css con y sin sesión (ficha 3)")
+    # DOM XSS
+    dom = []
+    for d in (x.get("sourcemaps") or []):
+        if d.get("own_files"):
+            sig = (x.get("source_signals") or {}).get(d["map"]) or {}
+            dom.append(f"{d['map']} → {d['own_files']} ficheros de código original" + (f" · señales: {', '.join(sig)}" if sig else ""))
+    sinks = rjson(out.parent / "explore" / "sinks.json") or []
+    taint = [s_ for s_ in sinks if "to-sink" in s_.get("rule", "")]
+    lst = [s_ for s_ in sinks if s_.get("rule") == "aegir-postmessage-listener" and not s_.get("origin_checked")]
+    dom = [f"{s_['fuente']} → sink en `{s_['file']}:{s_['line']}`" for s_ in taint[:5]] + \
+          [f"postMessage sin event.origin en `{s_['file']}:{s_['line']}`" for s_ in lst[:3]] + dom
+    if not taint and not lst:
+        dom.append("· los exploradores aún no han corrido o no han encontrado flujos (ver sección Exploradores)")
+    A["DOM XSS"] = (dom[:8], "seguir fuente→sink en el navegador y confirmar con DOM Invader (ficha 4)")
+    L = ["## 🎯 Dónde probar cada ancla", "",
+         "_Lo que ya tenemos, repartido entre las 4 clases. Candidatos, no hallazgos: cada uno se trabaja con su ficha._", ""]
+    for name, (items, how) in A.items():
+        L.append(f"### {name} — {len(items)} sitios por donde empezar")
+        L.append(f"_{how}_")
+        L += [f"- {i[2:]}" if i.startswith("· ") else f"- `{i}`" if not i.startswith("código público") and "→" not in i and "—" not in i else f"- {i}"
+              for i in items] or ["- (nada claro en los datos de esta corrida)"]
+        L.append("")
+    return L
+
+
 def hint(host, info):
     out = [msg for rx, msg in CLASS_HINTS if rx.search(host)]
     hi = info.get("hist") or {}
@@ -80,6 +171,10 @@ def write(run, out, pname, prog, ponly, rows, final, new_hosts, fresh, hist, tko
                    "\n".join(f"- `{t}`" for t in drift.get("not_in_platform", [])[:30])) if drift.get("not_in_platform") else "") +
                  "\n\n→ Revisar en la web del programa y añadir al yaml si es real (targets nuevos = menos dups).\n")
 
+    try:
+        L += anchors_section(out, final, x)
+    except Exception as e:                                  # el briefing nunca se cae por esta sección
+        L.append(f"_(sección de anclas no disponible: {e})_\n")
     L.append("## 🎯 Top 10 — dónde mirar primero\n")
     L.append("| # | Host | Score | Por qué | Qué probar | Cuentas |")
     L.append("|---|---|---|---|---|---|")

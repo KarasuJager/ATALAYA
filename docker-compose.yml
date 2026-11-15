@@ -1,6 +1,7 @@
 services:
   osint:
     build: .
+    image: atalaya-osint:latest      # la usa de base Dockerfile.explore
     volumes:
       - ./scope:/scope:ro
       - ./data:/data
@@ -23,3 +24,25 @@ services:
       - BBSCOPE_BC_TOKEN=${BBSCOPE_BC_TOKEN:-}
       - BBSCOPE_IT_TOKEN=${BBSCOPE_IT_TOKEN:-}
       - BBSCOPE_YWH_TOKEN=${BBSCOPE_YWH_TOKEN:-}
+
+  # Exploradores (Capa 1): docker compose run --rm explore /data/<programa>/<fecha> [--vigia-js /vigia/<programa>/<fecha>/findings/js-raw]
+  explore:
+    build:
+      context: .
+      dockerfile: Dockerfile.explore
+    image: atalaya-explore:latest
+    volumes:
+      - ./scope:/scope:ro
+      - ./data:/data
+      - ../../programs:/programs:ro
+      - ../Vigia/data:/vigia:ro
+      - ./intel:/app/intel:ro
+      - ./explore:/app/explore:ro
+      - explore-cache:/cache
+    environment:
+      - HANDLE=${HANDLE:-Manuel_Miguel}
+      - ATALAYA_PASSIVE=${ATALAYA_PASSIVE:-0}
+      - EXPLORE_SKIP=${EXPLORE_SKIP:-}
+
+volumes:
+  explore-cache:

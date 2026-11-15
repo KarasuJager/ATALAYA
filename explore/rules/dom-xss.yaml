@@ -1,0 +1,113 @@
+# AEGIR — reglas Semgrep (modo taint) para DOM XSS. Fuentes que controla el atacante → sinks que ejecutan código.
+# Explorador de sinks (Capa 1). Lo que salga son CANDIDATOS: el XSSAgent y Manu confirman en el navegador.
+rules:
+  - id: aegir-dom-xss-url-to-sink
+    mode: taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "DOM XSS candidato: dato de la URL/referrer/nombre de ventana llega a un sink ($SINK)"
+    metadata: {ancla: dom-xss, fuente: url}
+    pattern-sources:
+      - pattern-either:
+          - pattern: location.hash
+          - pattern: location.search
+          - pattern: location.href
+          - pattern: window.location.hash
+          - pattern: window.location.search
+          - pattern: window.location.href
+          - pattern: document.location.hash
+          - pattern: document.location.href
+          - pattern: document.URL
+          - pattern: document.documentURI
+          - pattern: document.referrer
+          - pattern: window.name
+          - pattern: new URLSearchParams(...).get(...)
+          - pattern: $P.searchParams.get(...)
+    pattern-sinks: &sinks
+      - patterns:
+        - focus-metavariable: $SINK
+        - pattern-either:
+            - pattern: $EL.innerHTML = $SINK
+            - pattern: $EL.outerHTML = $SINK
+            - pattern: $EL.insertAdjacentHTML($POS, $SINK)
+            - pattern: document.write($SINK)
+            - pattern: document.writeln($SINK)
+            - pattern: eval($SINK)
+            - pattern: new Function(..., $SINK)
+            - pattern: setTimeout($SINK, ...)
+            - pattern: setInterval($SINK, ...)
+            - pattern: location.href = $SINK
+            - pattern: window.location.href = $SINK
+            - pattern: location.assign($SINK)
+            - pattern: location.replace($SINK)
+            - pattern: window.open($SINK, ...)
+            - pattern: $EL.src = $SINK
+            - pattern: $EL.href = $SINK
+            - pattern: $EL.setAttribute("href", $SINK)
+            - pattern: $EL.setAttribute("src", $SINK)
+            - pattern: $J(...).html($SINK)
+            - pattern: $J(...).append($SINK)
+            - pattern: $J.parseHTML($SINK)
+            - pattern: '{dangerouslySetInnerHTML: {__html: $SINK}}'
+            - pattern: '<$TAG dangerouslySetInnerHTML={{__html: $SINK}} />'
+            - pattern: $X.bypassSecurityTrustHtml($SINK)
+            - pattern: $X.bypassSecurityTrustUrl($SINK)
+            - pattern: $X.bypassSecurityTrustScript($SINK)
+    pattern-sanitizers: &sanitizers
+      - pattern-either:
+          - pattern: DOMPurify.sanitize(...)
+          - pattern: encodeURIComponent(...)
+          - pattern: encodeURI(...)
+          - pattern: $X.textContent
+          - pattern: parseInt(...)
+          - pattern: Number(...)
+
+  - id: aegir-dom-xss-postmessage-to-sink
+    mode: taint
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: "DOM XSS candidato: datos de postMessage llegan a un sink ($SINK). Comprobar si el listener valida event.origin"
+    metadata: {ancla: dom-xss, fuente: postMessage}
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $W.addEventListener("message", function ($E) { ... })
+          - pattern: $E.data
+      - patterns:
+          - pattern-inside: |
+              $W.addEventListener("message", ($E) => { ... })
+          - pattern: $E.data
+      - patterns:
+          - pattern-inside: |
+              $W.addEventListener("message", $E => { ... })
+          - pattern: $E.data
+      - patterns:
+          - pattern-inside: |
+              window.onmessage = function ($E) { ... }
+          - pattern: $E.data
+    pattern-sinks: *sinks
+    pattern-sanitizers: *sanitizers
+
+  - id: aegir-dom-xss-storage-to-sink
+    mode: taint
+    languages: [javascript, typescript]
+    severity: INFO
+    message: "DOM XSS candidato (de segundo orden): localStorage/sessionStorage llega a un sink ($SINK). ¿Quién escribe ese valor?"
+    metadata: {ancla: dom-xss, fuente: storage}
+    pattern-sources:
+      - pattern-either:
+          - pattern: localStorage.getItem(...)
+          - pattern: sessionStorage.getItem(...)
+          - pattern: localStorage.$KEY
+          - pattern: sessionStorage.$KEY
+    pattern-sinks: *sinks
+    pattern-sanitizers: *sanitizers
+
+  - id: aegir-postmessage-listener
+    languages: [javascript, typescript]
+    severity: INFO
+    message: "Listener de postMessage (run_explore.py marca si comprueba event.origin)"
+    metadata: {ancla: dom-xss, fuente: postMessage}
+    pattern-either:
+      - pattern: $W.addEventListener("message", ...)
+      - pattern: window.onmessage = $F

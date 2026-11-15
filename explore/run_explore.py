@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""Exploradores AEGIR (Capa 1): encuentran lo que las herramientas de recon no ven. El agente propone, la herramienta verifica.
+
+Uso (dentro del contenedor `explore`):
+  run_explore.py /data/<programa>/<ts> [--program-yaml /programs/<p>.yaml] [--vigia-js /vigia/<...>/findings/js-raw]
+                 [--skip hosts,sinks,routes]
+Salida: <run>/explore/  hosts.json · sinks.json · routes.json · EXPLORE.md (y una sección añadida al BRIEFING.md)
+
+- hosts : regulator (patrones de nombres) + subwiz (IA) SIN resolver por su cuenta → scope → DNS solo si el programa
+          permite automatización (gate). Lo no resuelto queda "sin confirmar".
+- sinks : Semgrep en modo taint (reglas propias de DOM XSS) sobre código de sourcemaps, JS archivado y JS de VIGÍA.
+          Cada flujo con fichero:línea. Los flujos entre funciones los sigue el XSSAgent leyendo el código (SemTaint).
+- routes: rutas hermanas de las reales (versión, subrecursos de un {id}, singular/plural); "vista en historial" o
+          "sin confirmar". Pasivo: no se pide nada al target.
+"""
+import argparse, concurrent.futures as cf, json, os, re, shutil, subprocess, sys, tempfile, time
+from pathlib import Path
+sys.path.insert(0, "/app/intel")
+from common import load_program, passive_only, registrable, rlines, wlines, wjson, rjson, log, LOG_LINES  # noqa: E402
+
+RULES = Path(__file__).parent / "rules" / "dom-xss.yaml"
+REGULATOR = Path("/opt/regulator/main.py")
+
+
+def run(cmd, timeout=1800, cwd=None):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+    except FileNotFoundError:
+        return 127, "", "no instalado"
+
+
+# ------------------------------------------------------------------ hosts
+HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\.?$", re.I)
+
+
+def dig_ok(h):
+    """(host, respuestas) — solo IPs reales o CNAME con forma de host. Las líneas de error de dig (';; …') NO cuentan."""
+    try:
+        r = subprocess.run(["dig", "+time=3", "+tries=2", "+short", "A", h], capture_output=True, text=True, timeout=15)
+        lines = [l.strip() for l in r.stdout.splitlines() if l.strip() and not l.startswith(";")]
+        ips = [l for l in lines if re.match(r"^\d+\.\d+\.\d+\.\d+$", l)]
+        cn = [l.rstrip(".") for l in lines if HOSTNAME.match(l) and not re.match(r"^\d+\.\d+\.\d+\.\d+$", l)]
+        return h, ips + [f"CNAME {c}" for c in cn[:1]]
+    except Exception:
+        return h, []
+
+
+def verify(out, res, active_ok, threads=8):
+    if not active_ok:
+        return res
+    if not shutil.which("dig"):
+        log("[hosts] ⚠ 'dig' no está en el contenedor — no se puede verificar DNS"); return res
+    ctrl = next(iter(sorted({registrable(h) for h in res})), None)
+    if ctrl:
+        c = dig_ok("www." + ctrl)[1] or dig_ok(ctrl)[1]
+        log(f"[hosts] control DNS {ctrl}: {'OK ' + str(c[:1]) if c else '⚠ NO resuelve — DNS del contenedor roto, resultados no fiables'}")
+    with cf.ThreadPoolExecutor(threads) as ex:
+        for h, ans in ex.map(dig_ok, sorted(res)):
+            res[h]["resolves"] = bool(ans); res[h]["answer"] = ans[:4]
+    return res
+
+
+def explore_hosts(run_dir, out, scope, active_ok, max_per_tool=120, reverify=False):
+    if reverify:
+        allc = rjson(out / "hosts.json") or {}
+        per, res = {}, {}
+        for h, v in allc.items():                       # orden de subwiz = de más a menos probable
+            r = registrable(h)
+            if per.get(r, 0) < max_per_tool:
+                per[r] = per.get(r, 0) + 1; res[h] = v
+        res = verify(out, res, active_ok)
+        wjson(out / "hosts.json", res)
+        wlines(out / "hosts-verified.txt", sorted(h for h, v in res.items() if v["resolves"]))
+        log(f"[hosts] re-verificados {len(res)} candidatos · {sum(1 for v in res.values() if v['resolves'])} resuelven")
+        return res
+    hosts = rjson(run_dir / "intel" / "hosts.json") or {}
+    known = sorted(h for h in hosts if "*" not in h)
+    if not known:
+        log("[hosts] sin hosts.json de intel: ejecuta antes Atalaya"); return {}
+    by_root = {}
+    for h in known:
+        by_root.setdefault(registrable(h), []).append(h)
+    cand = {}
+    tmp = Path(tempfile.mkdtemp(prefix="exp-"))
+    # regulator: necesita ~100 nombres por dominio raíz para aprender patrones útiles
+    if "regulator" in os.environ.get("EXPLORE_SKIP", ""):
+        log("[hosts] regulator saltado (EXPLORE_SKIP)")
+    elif REGULATOR.exists():
+        for root, hs in by_root.items():
+            if len(hs) < 40:
+                continue
+            f = tmp / f"{root}.subs"; f.write_text("\n".join(hs), encoding="utf-8")
+            # regulator escribe logs/ y <target>.rules en el directorio actual: se lanza en una copia propia
+            wd = tmp / "regulator"
+            if not wd.exists():
+                shutil.copytree(REGULATOR.parent, wd, ignore=shutil.ignore_patterns(".git"))
+                (wd / "logs").mkdir(exist_ok=True)
+            rc, so, se = run([sys.executable, str(wd / "main.py"), "-t", root, "-f", str(f), "-o", str(tmp / f"{root}.out")],
+                             timeout=900, cwd=str(wd))
+            got = rlines(tmp / f"{root}.out")[:max_per_tool]
+            for g in got:
+                cand.setdefault(g.lower(), set()).add("regulator")
+            err = "" if rc == 0 else " · error: " + (se or so).strip().splitlines()[-1][:200] if (se or so).strip() else ""
+            log(f"[hosts] regulator {root}: {len(hs)} conocidos → {len(got)} candidatos (rc={rc}){err}")
+    else:
+        log("[hosts] regulator no instalado")
+    # subwiz: modelo de IA (local), SIN resolver (la resolución la hacemos nosotros con gate)
+    if "subwiz" in os.environ.get("EXPLORE_SKIP", ""):
+        log("[hosts] subwiz saltado (EXPLORE_SKIP)")
+    elif shutil.which("subwiz"):
+        f = tmp / "all.subs"; f.write_text("\n".join(known), encoding="utf-8")
+        o = tmp / "subwiz.out"
+        rc, so, se = run(["subwiz", "-i", str(f), "-o", str(o), "--no-resolve", "--multi-apex", "-n", str(max_per_tool), "-q"],
+                         timeout=2400)
+        got = rlines(o)
+        for g in got:
+            cand.setdefault(g.lower(), set()).add("subwiz")
+        log(f"[hosts] subwiz: {len(got)} candidatos (rc={rc}) {se.strip()[:160] if rc else ''}")
+    else:
+        log("[hosts] subwiz no instalado")
+    shutil.rmtree(tmp, ignore_errors=True)
+    new = {h: s for h, s in cand.items() if h not in hosts and scope.status(h) in ("in", "apex")}
+    res = {h: {"sources": sorted(v), "resolves": None, "answer": []} for h, v in new.items()}
+    if active_ok and res:
+        res = verify(out, res, active_ok)
+        log(f"[hosts] {len(res)} candidatos en scope · {sum(1 for v in res.values() if v['resolves'])} resuelven (DNS)")
+    else:
+        log(f"[hosts] {len(res)} candidatos en scope · DNS NO comprobado ({'programa sin automatización' if not active_ok else 'nada que comprobar'})")
+    wjson(out / "hosts.json", res)
+    wlines(out / "hosts-verified.txt", sorted(h for h, v in res.items() if v["resolves"]))
+    return res
+
+
+# ------------------------------------------------------------------ sinks
+def _host_from_name(name):
+    """VIGÍA guarda 'https___host_ruta.js' → host."""
+    m = re.match(r"^https?___([^_]+)_", name)
+    return m.group(1).lower() if m else ""
+
+
+def prepare_js(run_dir, vigia_js, scope, work):
+    """Copia a `work` solo el JS que interesa, con extensión .js: sourcemaps (sin node_modules), JS archivado y
+    JS de VIGÍA SOLO de hosts en scope (el resto son terceros: Microsoft, HubSpot, analítica…)."""
+    work.mkdir(parents=True, exist_ok=True)
+    n = {"sourcemaps": 0, "archived": 0, "vigia": 0, "vigia_terceros": 0}
+    sm = run_dir / "intel" / "sourcemaps"
+    for f in (sm.rglob("*") if sm.exists() else []):
+        if f.is_file() and "node_modules" not in f.parts and "_maps" not in f.parts and "jsluice" not in f.parts \
+                and f.suffix in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".vue"):
+            dst = work / "sourcemaps" / f.relative_to(sm)
+            dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(f, dst); n["sourcemaps"] += 1
+    ar = run_dir / "intel" / "archived-js" / "files"
+    for f in (ar.iterdir() if ar.exists() else []):
+        if f.is_file():
+            dst = work / "archived" / (f.name if f.name.endswith(".js") else f.name + ".js")
+            dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(f, dst); n["archived"] += 1
+    if vigia_js and Path(vigia_js).exists():
+        for f in Path(vigia_js).iterdir():
+            if not f.is_file():
+                continue
+            h = _host_from_name(f.name)
+            if h and scope.status(h) in ("in", "apex") and f.stat().st_size < 6_000_000:
+                dst = work / "vigia" / (f.name if f.name.endswith(".js") else f.name + ".js")
+                dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(f, dst); n["vigia"] += 1
+            else:
+                n["vigia_terceros"] += 1
+    log(f"[sinks] JS a analizar: {n['sourcemaps']} de sourcemaps · {n['archived']} archivados · {n['vigia']} de VIGÍA en scope "
+        f"({n['vigia_terceros']} de terceros descartados)")
+    return n
+
+
+def explore_sinks(run_dir, out, vigia_js=None, scope=None):
+    if not shutil.which("semgrep"):
+        log("[sinks] semgrep no instalado"); return []
+    work = Path(tempfile.mkdtemp(prefix="sg-"))
+    n = prepare_js(run_dir, vigia_js, scope, work)
+    if not sum(v for k, v in n.items() if k != "vigia_terceros"):
+        log("[sinks] no hay JS que analizar (sourcemaps, archived-js o VIGÍA en scope)"); return []
+    cmd = ["semgrep", "--config", str(RULES), "--json", "--metrics=off", "--quiet", "--timeout", "60",
+           "--max-target-bytes", "6000000", "--no-git-ignore", str(work)]
+    rc, so, se = run(cmd, timeout=3600)
+    try:
+        d = json.loads(so or "{}")
+    except Exception:
+        log(f"[sinks] salida de semgrep ilegible (rc={rc}): {se[:300]}"); return []
+    errs = d.get("errors", [])
+    if errs:
+        wjson(out / "semgrep-errors.json", errs)
+        first = errs[0]
+        log(f"[sinks] semgrep: {len(errs)} errores (ver explore/semgrep-errors.json). Primero: "
+            f"{str(first.get('type') or first.get('level'))} · {str(first.get('message'))[:200]}")
+    found = []
+    for r in d.get("results", []):
+        path, l0, l1 = r["path"], r["start"]["line"], r["end"]["line"]
+        try:
+            lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            lines = []
+        snippet = "\n".join(lines[max(0, l0 - 1):min(len(lines), l1, l0 + 2)])[:400]
+        rule = r["check_id"].split(".")[-1]
+        item = {"rule": rule, "file": path.replace(str(work) + "/", ""), "line": l0,
+                "fuente": (r["extra"].get("metadata") or {}).get("fuente"), "snippet": snippet}
+        if rule == "aegir-postmessage-listener":
+            body = "\n".join(lines[l0 - 1:min(len(lines), l0 + 40)])
+            item["origin_checked"] = bool(re.search(r"\.origin\b", body))
+            if item["origin_checked"]:
+                item["nota"] = "comprueba event.origin (revisar si la comprobación es débil: indexOf/regex)"
+        found.append(item)
+    # orden: flujos taint primero, luego listeners sin origin, luego el resto
+    rank = lambda i: (0 if "to-sink" in i["rule"] else 1 if (i["rule"] == "aegir-postmessage-listener" and not i.get("origin_checked")) else 2)
+    found.sort(key=rank)
+    shutil.rmtree(work, ignore_errors=True)
+    wjson(out / "sinks.json", found)
+    log(f"[sinks] {sum(1 for f in found if 'to-sink' in f['rule'])} flujos fuente→sink · "
+        f"{sum(1 for f in found if f['rule']=='aegir-postmessage-listener' and not f.get('origin_checked'))} listeners postMessage sin origin · "
+        f"errores semgrep: {len(errs)}")
+    return found
+
+
+# ------------------------------------------------------------------ routes
+SUBRES = ["documents", "statements", "transactions", "payments", "cards", "accounts", "users", "history", "export",
+          "download", "settings", "limits", "applications", "notes", "attachments", "members", "permissions", "roles",
+          "invoices", "orders", "refunds", "address", "contacts", "consents", "audit"]
+VER = re.compile(r"/v(\d+)(?=/)")
+IDSEG = re.compile(r"/(\{id\}|\d{2,}|[0-9a-f]{8}-[0-9a-f-]{27,}|:[a-zA-Z_]+Id|\$\{[^}]+\})(?=/|$)")
+
+
+SDK = re.compile(r"^/(api/v1/(authn|sessions)|v1/(authorize|token|userinfo|interact|revoke|logout|introspect|keys)|oauth2|idp/|\.well-known/)")
+VERBISH = re.compile(r"(?i)(sh|ch|x|ss|us|is|ed|ing|ize|ise|ate|in|out|up|me|status|info|data|config|health|login|logout|"
+                     r"refresh|introspect|unlock|verify|validate|search|token|password|authn|authz|authorize|callback|"
+                     r"webhook|preferences?|generator|service|bff|checkout)$")
+
+
+NOISE = re.compile(r"(?i)(\.[a-z0-9]{2,5}$|/wp-(json|content|admin)\b)")   # ficheros estáticos y CMS de marketing
+
+
+def norm(p):
+    return IDSEG.sub("/{id}", p.split("?")[0].rstrip("/"))
+
+
+def explore_routes(run_dir, out, max_out=400):
+    rows = rjson(run_dir / "intel" / "jsluice" / "urls.json") or []
+    rows += rjson(run_dir / "intel" / "sourcemaps" / "jsluice" / "urls.json") or []
+    paths = set()
+    for r in rows:
+        u = r.get("url", "")
+        p = "/" + u.split("://", 1)[1].split("/", 1)[1] if "://" in u and "/" in u.split("://", 1)[1] else u
+        if p.startswith("/") and not SDK.search(p) and re.search(r"(?i)/(api|v\d|bff|service|internal|admin|account|user|customer|merchant|payment|loan|card)", p):
+            paths.add(norm(p))
+    for u in rlines(run_dir / "intel" / "history" / "api-routes.txt"):
+        p = u.split("://", 1)[-1]
+        p = "/" + p.split("/", 1)[1] if "/" in p else ""
+        if p and not SDK.search(p):
+            paths.add(norm(p))
+    hist = {norm("/" + u.split("://", 1)[-1].split("/", 1)[1]) for u in rlines(run_dir / "merged" / "all-historical-urls.txt")
+            if "://" in u and "/" in u.split("://", 1)[1]}
+    cand = {}
+    paths = {p for p in paths if not NOISE.search(p)}
+    for p in sorted(paths):
+        m = VER.search(p)
+        if m:
+            v = int(m.group(1))
+            for nv in {v - 1, v + 1} - {0}:
+                cand.setdefault(VER.sub(f"/v{nv}", p, count=1), set()).add(f"versión hermana de {p}")
+        if "{id}" in p:
+            base = p if p.endswith("{id}") else p[:p.rindex("{id}") + 4]
+            for s_ in SUBRES:
+                cand.setdefault(f"{base}/{s_}", set()).add(f"subrecurso de {base}")
+        last = p.rsplit("/", 1)[-1]
+        if last and "{" not in last and re.match(r"^[a-z-]{4,}$", last) and not VERBISH.search(last):
+            alt = last[:-1] if last.endswith("s") else last + "s"
+            cand.setdefault(p[: -len(last)] + alt, set()).add(f"singular/plural de {p}")
+    res = []
+    for c, why in cand.items():
+        if c in paths:
+            continue
+        res.append({"route": c, "why": sorted(why)[:2], "seen_in_history": c in hist})
+    kind = lambda r: 0 if r["why"][0].startswith("versión") else 1 if r["why"][0].startswith("subrecurso") else 2
+    res.sort(key=lambda r: (not r["seen_in_history"], kind(r), r["route"]))
+    res = res[:max_out]
+    wjson(out / "routes.json", res)
+    log(f"[routes] {len(paths)} rutas reales → {len(res)} hermanas ({sum(r['seen_in_history'] for r in res)} vistas en el historial)")
+    return res
+
+
+# ------------------------------------------------------------------ resumen
+def summary(out, hosts, sinks, routes, active_ok):
+    L = ["## 🔭 Exploradores (Capa 1) — lo que las herramientas no ven", ""]
+    if hosts:
+        ok = [h for h, v in hosts.items() if v["resolves"]]
+        L.append(f"**Hosts deducidos:** {len(hosts)} en scope" + (f", **{len(ok)} resuelven**" if active_ok else " (DNS no comprobado: programa sin automatización)"))
+        L += [f"- `{h}` ← {', '.join(hosts[h]['sources'])}" for h in sorted(ok)[:20]] + [""]
+    taint = [s for s in sinks if "to-sink" in s["rule"]]
+    lst = [s for s in sinks if s["rule"] == "aegir-postmessage-listener" and not s.get("origin_checked")]
+    if taint or lst:
+        L.append(f"**DOM XSS candidatos:** {len(taint)} flujos fuente→sink · {len(lst)} listeners de postMessage sin `event.origin`")
+        L += [f"- {s['fuente']}: `{s['file']}:{s['line']}`" for s in (taint + lst)[:15]] + [""]
+    seen = [r for r in routes if r["seen_in_history"]]
+    if routes:
+        L.append(f"**Rutas hermanas:** {len(routes)} candidatas · {len(seen)} vistas en el historial")
+        L += [f"- `{r['route']}` ({r['why'][0]})" for r in seen[:15]] + [""]
+    L.append("_Detalle: `explore/hosts.json`, `explore/sinks.json`, `explore/routes.json`. Todo son candidatos: lo prueba Manu._")
+    (out / "EXPLORE.md").write_text("\n".join(L), encoding="utf-8")
+    return "\n".join(L)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run_dir")
+    ap.add_argument("--program-yaml", default=os.environ.get("PROGRAM_YAML"))
+    ap.add_argument("--vigia-js", default=None)
+    ap.add_argument("--skip", default=os.environ.get("EXPLORE_SKIP", ""))
+    ap.add_argument("--reverify", action="store_true", help="solo re-comprobar el DNS de explore/hosts.json (sin subwiz/regulator)")
+    a = ap.parse_args()
+    run_dir = Path(a.run_dir)
+    out = run_dir / "explore"; out.mkdir(exist_ok=True)
+    prog_yaml = a.program_yaml or (f"/programs/{run_dir.parent.name}.yaml" if Path(f"/programs/{run_dir.parent.name}.yaml").exists() else None)
+    prog, scope = load_program(prog_yaml, None)
+    active_ok = not passive_only(prog) and os.environ.get("ATALAYA_PASSIVE", "0") != "1"
+    skip = {x.strip() for x in a.skip.split(",") if x.strip()}
+    t0 = time.time()
+    log(f"Exploradores · {run_dir.parent.name} · {run_dir.name} · DNS permitido={active_ok}")
+    hosts = explore_hosts(run_dir, out, scope, active_ok, reverify=a.reverify) if "hosts" not in skip else {}
+    sinks = explore_sinks(run_dir, out, Path(a.vigia_js) if a.vigia_js else None, scope) if "sinks" not in skip else []
+    routes = explore_routes(run_dir, out) if "routes" not in skip else []
+    txt = summary(out, hosts, sinks, routes, active_ok)
+    b = run_dir / "intel" / "BRIEFING.md"
+    if b.exists():
+        cur = b.read_text(encoding="utf-8")
+        cur = cur.split("\n## 🔭 Exploradores")[0].rstrip() + "\n\n" + txt + "\n"
+        b.write_text(cur, encoding="utf-8")
+        (run_dir / "BRIEFING.md").write_text(cur, encoding="utf-8")
+    wlines(out / "explore.log", LOG_LINES)
+    log(f"exploradores listos en {int(time.time() - t0)}s → {out}")
+
+
+if __name__ == "__main__":
+    main()
