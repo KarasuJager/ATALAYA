@@ -203,30 +203,60 @@ def github(roots, scope, max_pages=2):
 
 
 # ---------------------------------------------------------------- Postman público
-def postman(roots, scope):
-    out = []
-    for root in roots:
-        body = {"service": "search", "method": "POST", "path": "/search-all",
-                "body": {"queryIndices": ["runtime.collection", "runtime.request", "collaboration.workspace", "adp.api"],
-                         "queryText": root, "size": 100, "from": 0, "requestOrigin": "srp", "mergeEntities": True,
-                         "nonNestedRequests": True}}
-        s, d = jget("https://www.postman.com/_api/ws/proxy", data=body, timeout=40, headers={"Origin": "https://www.postman.com"})
+PM_API = "https://api.postman.com/search"
+
+
+def _pm_search(q, element, key, limit=25, pages=2):
+    """Búsqueda oficial de Postman (POST api.postman.com/search). Sin clave devuelve solo lo público."""
+    hdr = {"Accept": "application/json"}
+    if key:
+        hdr["x-api-key"] = key
+    body = {"elementType": element, "q": q, "ownership": "all",
+            "filters": {"$and": [{"visibility": {"$eq": "public"}}]}}
+    items, cursor, last = [], None, None
+    for _ in range(pages):
+        url = f"{PM_API}?limit={limit}" + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else "")
+        s, d = jget(url, data=body, timeout=40, headers=hdr)
+        last = s
+        if d is None and s == 400 and "filters" in body:      # si el filtro no aplica a ese tipo, reintentar sin él
+            body.pop("filters"); s, d = jget(url, data=body, timeout=40, headers=hdr); last = s
         if d is None:
-            st("postman", False, f"{root} http={s}"); continue
+            return items, last
+        items += d.get("data") or []
+        cursor = (d.get("meta") or {}).get("nextCursor")
+        if not cursor:
+            break
+        time.sleep(1.5)
+    return items, last
+
+
+def postman(roots, scope):
+    """Colecciones, peticiones y workspaces PÚBLICOS de Postman que citan hosts en scope.
+    (La antigua búsqueda web _api/ws/proxy dejó de funcionar en nov-2026 → API oficial.)"""
+    key = os.environ.get("POSTMAN_API_KEY", "")
+    out, fails = [], 0
+    for root in roots:
         n = 0
-        for it in d.get("data", []) or []:
-            doc = it.get("document") or {}
-            txt = json.dumps(doc)
-            hosts = sorted({h.lower() for h in HOST_RE.findall(txt) if scope.ok(h.lower())})
-            if not hosts:
-                continue
-            n += 1
-            out.append({"type": doc.get("documentType") or it.get("type"), "name": doc.get("name"),
-                        "publisher": doc.get("publisherHandle"), "url": doc.get("url"),
-                        "workspaces": [w.get("slug") for w in (doc.get("workspaces") or []) if isinstance(w, dict)],
-                        "hosts": hosts, "method": doc.get("method")})
+        for element in ("requests", "collections", "workspaces"):
+            items, code = _pm_search(root, element, key)
+            if not items and code not in (200, None):
+                fails += 1; st("postman", False, f"{root} {element} http={code}"); continue
+            for it in items:
+                txt = json.dumps(it)
+                hosts = sorted({h.lower() for h in HOST_RE.findall(txt) if scope.ok(h.lower())})
+                if not hosts:
+                    continue
+                n += 1
+                ws = it.get("workspace") or {}
+                out.append({"type": element[:-1], "name": it.get("name"), "id": it.get("id"),
+                            "publisher": ((it.get("team") or {}).get("name") or (it.get("organization") or {}).get("name") or ""),
+                            "url": it.get("url"), "method": it.get("method"),
+                            "web": ((it.get("links") or {}).get("web") or {}).get("href") if isinstance((it.get("links") or {}).get("web"), dict) else (it.get("links") or {}).get("web"),
+                            "workspace_id": ws.get("id") if isinstance(ws, dict) else None,
+                            "workspaces": [ws.get("name")] if isinstance(ws, dict) and ws.get("name") else [],
+                            "hosts": hosts})
+            time.sleep(1.5)
         st("postman", True, f"{root}: {n} elementos públicos que citan hosts en scope")
-        time.sleep(2)
     return out
 
 

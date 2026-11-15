@@ -14,14 +14,31 @@ disponible sobre un target **antes** de lanzar herramientas de recon activo
 crt.sh (certificados CT)
   → whois (registro, ASN)
   → dnsrecon (DNS completo)
-  → waybackurls (URLs históricas Wayback)
+  → Wayback CDX (URLs históricas, consulta directa a archive.org)
   → gau (URLs de AlienVault + Wayback + Common Crawl + URLScan)
   → whatweb (fingerprinting tecnológico)
   → wafw00f (detección de WAF)
   → theHarvester (emails + subdominios, fuentes libres)
   → [Shodan] (puertos + servicios, opcional con API key)
   → merge + deduplicación + filtrado
+  → intel (v3): visión de bounty → BRIEFING.md
 ```
+
+## v3 — capa intel ("visión de bounty")
+
+Al final de cada corrida, `intel/` convierte las listas en **dónde mirar primero**. Todo pasivo: nada toca el target.
+
+- **BRIEFING.md**: top 10 hosts puntuados 0–100 (por qué y qué probar), hosts nuevos respecto a la corrida
+  anterior, certificados recién emitidos, specs y sourcemaps, rutas reales del JS, posibles fugas y avisos del programa.
+- **Fuentes**: crt.sh con fechas, DNS (+ DNS colgando), Shodan InternetDB, urlscan, GitHub (code search,
+  github-subdomains/endpoints), Postman (API oficial), JS archivado, Chaos, Docker Hub, bbscope.
+- **Análisis de JS**: jsluice (AST) y sourcemapper (código original desde `.js.map` archivados).
+- **Secretos**: trufflehog **siempre sin verificar** (verificar = usar la credencial).
+- **Reglas del programa**: si el yaml del programa prohíbe automatización, no se lanza nada activo
+  (whatweb, wafw00f, buckets).
+
+Detalle de módulos, variables y campos opcionales del yaml: [`intel/README.md`](intel/README.md).
+Claves opcionales en `.env`: `GITHUB_TOKEN` (solo lectura), `URLSCAN_API_KEY`, `POSTMAN_API_KEY`, tokens de bbscope.
 
 ## Setup
 

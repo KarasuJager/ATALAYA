@@ -31,6 +31,7 @@ PROGRAM=$(basename "$1" .txt)
 # Identificación del tráfico activo (whatweb, wafw00f). Pasivo (crt.sh, wayback, gau, whois, dns) no lleva.
 HANDLE="${HANDLE:-researcher}"
 UA="${UA_OVERRIDE:-bugbounty-${HANDLE}}"
+export UA   # lo usan los scripts auxiliares (wayback_cdx.sh)
 IDENT_HEADER="${IDENT_HEADER:-X-Bug-Bounty}"
 HDRS=$(mktemp); printf 'User-Agent: %s\n%s: %s\n' "$UA" "$IDENT_HEADER" "$HANDLE" > "$HDRS"
 echo " UA: $UA"
@@ -147,7 +148,8 @@ echo " [4/8] Wayback URLs"
 echo "══════════════════════════════════════════"
 for root in $ROOTS; do
     echo "  → $root"
-    fetch_hist wayback "$root" "$OUT/wayback/${root}.txt" 180 3 waybackurls
+    # waybackurls fallaba en silencio (0 URLs sin error) → consulta directa al CDX de archive.org
+    fetch_hist wayback "$root" "$OUT/wayback/${root}.txt" 330 2 bash /app/scripts/wayback_cdx.sh
 done
 echo ""
 

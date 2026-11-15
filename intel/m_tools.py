@@ -261,7 +261,7 @@ def dockerhub(brand_list, namespaces, out_dir: Path, max_images=6, max_gb=1.5):
 
 
 # ------------------------------------------------------------- 4. Postman a fondo (porch-pirate)
-def postman_deep(roots, scope: Scope, out_dir: Path, max_ws=15):
+def postman_deep(roots, scope: Scope, out_dir: Path, max_ws=15, pm_hits=None):
     od = out_dir / "postman"; od.mkdir(parents=True, exist_ok=True)
     try:
         from porchpirate import porchpirate
@@ -269,7 +269,13 @@ def postman_deep(roots, scope: Scope, out_dir: Path, max_ws=15):
     except Exception as e:
         st("porch-pirate", False, f"no instalado ({e})"); return []
     wss, reqs = {}, []
-    for r in roots:
+    for h in pm_hits or []:                       # resultados de la búsqueda oficial (m_sources.postman)
+        if h.get("workspace_id"):
+            wss.setdefault(h["workspace_id"], {"name": (h.get("workspaces") or [""])[0], "hosts": set()})["hosts"].update(h["hosts"])
+        if h.get("type") == "request":
+            reqs.append({"name": h.get("name"), "method": h.get("method"), "url": h.get("url"), "hosts": h["hosts"],
+                         "publisher": h.get("publisher", "")})
+    for r in ([] if pm_hits is not None else roots):   # respaldo: búsqueda antigua de porch-pirate
         try:
             d = json.loads(pp.search(r) or "{}")
         except Exception as e:

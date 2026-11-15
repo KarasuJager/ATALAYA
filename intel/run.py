@@ -162,7 +162,7 @@ def main():
             for h in x_gh_subs: touch(h, "github-subdomains")
             extra_urls += [e for e in x["gh_endpoints"] if e.startswith("http")]
         if "postman" not in skip:
-            x["postman_ws"] = m_tools.postman_deep(roots, scope, out)
+            x["postman_ws"] = m_tools.postman_deep(roots, scope, out, pm_hits=pm)
             for w in x["postman_ws"]:
                 for h in w["hosts"]: touch(h, "postman")
     hist = m_history.run(urls + extra_urls, scope, out)

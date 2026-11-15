@@ -9,7 +9,7 @@ SPEC_RE = re.compile(r"(?i)(swagger|openapi|api-docs|apidocs|redoc|graphiql|play
 JS_RE = re.compile(r"(?i)\.(m?js)(\?|$)")
 MAP_RE = re.compile(r"(?i)\.js\.map(\?|$)")
 CFG_RE = re.compile(r"(?i)\.(env|ya?ml|json|xml|config|conf|ini|bak|old|sql|log|zip|tar|gz|7z|rar|pem|key|p12|pfx|csv|xls[x]?)(\?|$)")
-STATIC_RE = re.compile(r"(?i)\.(png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|css|mp4|webm|mp3|pdf)(\?|$)")
+STATIC_RE = re.compile(r"(?i)(\.(png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|css|mp4|webm|mp3|pdf)(\?|$)|/_Incapsula_Resource|/cdn-cgi/|/__cf_chl)")
 AUTH_RE = re.compile(r"(?i)(oauth|openid|saml|sso|login|signin|signup|register|reset|forgot|verify|otp|mfa|2fa|token|session|callback|redirect_uri)")
 # parámetros con pinta de identificador de objeto → candidatos IDOR (con 2 cuentas)
 IDOR_PARAM = re.compile(r"(?i)^(id|ids|uid|user_?id|account_?id|acct|customer_?id|client_?id|order_?id|invoice_?id|"

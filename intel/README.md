@@ -11,7 +11,7 @@ Se ejecuta sola al final de `osint.sh` (paso 9/9). **Todo pasivo**: nada toca el
 | `m_sources.internetdb` | internetdb.shodan.io (sin clave) | puertos, CPEs, CVEs por IP |
 | `m_sources.urlscan` | urlscan.io search (clave opcional `URLSCAN_API_KEY`) | hosts/URLs vistos por terceros |
 | `m_sources.github` | GitHub code search (**necesita `GITHUB_TOKEN`**) | ficheros públicos que citan hosts en scope |
-| `m_sources.postman` | Postman public search | colecciones/workspaces públicos con hosts en scope |
+| `m_sources.postman` | Postman **API oficial** `api.postman.com/search` (sin clave = solo público; la búsqueda web antigua murió en nov-2026) | colecciones/workspaces públicos con hosts en scope |
 | `m_sources.archived_js` | web.archive.org (copias, no el target) | rutas y secretos (enmascarados) en JS antiguo |
 | `m_program` | **bbscope** (con tu sesión → incluye privados) o, si no hay token, bounty-targets-data | scope de la plataforma vs nuestro yaml (targets nuevos / retirados) |
 | `m_tools.jsluice` | **jsluice** (BishopFox, análisis AST) sobre JS archivado y código de sourcemaps | `intel/jsluice/` urls.json, paths.txt, params.txt, secrets.json |
