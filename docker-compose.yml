@@ -4,5 +4,21 @@ services:
     volumes:
       - ./scope:/scope:ro
       - ./data:/data
+      - ../../programs:/programs:ro
+      # código montado en vivo: un arreglo en intel/ o scripts/ se aplica sin volver a hacer build
+      - ./intel:/app/intel:ro
+      - ./scripts:/app/scripts:ro
     environment:
       - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - URLSCAN_API_KEY=${URLSCAN_API_KEY:-}
+      - HANDLE=${HANDLE:-Manuel_Miguel}
+      - PROGRAM_YAML=${PROGRAM_YAML:-}
+      - ATALAYA_PASSIVE=${ATALAYA_PASSIVE:-0}
+      - INTEL_SKIP=${INTEL_SKIP:-}
+      # bbscope (scope de la plataforma con tu sesión → incluye privados). Solo en .env, nunca en git.
+      - BBSCOPE_H1_USER=${BBSCOPE_H1_USER:-}
+      - BBSCOPE_H1_TOKEN=${BBSCOPE_H1_TOKEN:-}
+      - BBSCOPE_BC_TOKEN=${BBSCOPE_BC_TOKEN:-}
+      - BBSCOPE_IT_TOKEN=${BBSCOPE_IT_TOKEN:-}
+      - BBSCOPE_YWH_TOKEN=${BBSCOPE_YWH_TOKEN:-}

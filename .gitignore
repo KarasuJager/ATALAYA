@@ -4,3 +4,8 @@ runs/
 .DS_Store
 Thumbs.db
 scope/*.txt
+
+# Python / copias locales
+__pycache__/
+*.pyc
+*.bak

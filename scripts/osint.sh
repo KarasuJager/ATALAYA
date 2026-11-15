@@ -26,6 +26,8 @@ LC_ALL=C sed "1s/^\xef\xbb\xbf//" "$SCOPE" | sed 's/\r$//' | tr -d '\0' > "$CLEA
 SCOPE="$CLEAN_SCOPE"
 
 PROGRAM=$(basename "$1" .txt)
+# yaml del programa (scope/reglas/known_dups) montado desde aegir-vps/programs
+[ -z "${PROGRAM_YAML:-}" ] && [ -f "/programs/${PROGRAM}.yaml" ] && PROGRAM_YAML="/programs/${PROGRAM}.yaml"
 # Identificación del tráfico activo (whatweb, wafw00f). Pasivo (crt.sh, wayback, gau, whois, dns) no lleva.
 HANDLE="${HANDLE:-researcher}"
 UA="${UA_OVERRIDE:-bugbounty-${HANDLE}}"
@@ -55,9 +57,9 @@ echo " [1/8] Certificate Transparency (crt.sh)"
 echo "══════════════════════════════════════════"
 for root in $ROOTS; do
     echo "  → $root"
-    curl -s "https://crt.sh/?q=%25.${root}&output=json" 2>/dev/null \
-        | jq -r '.[].name_value' 2>/dev/null \
-        | sed 's/\*\.//g' \
+    curl -s --max-time 90 "https://crt.sh/?q=%25.${root}&output=json" -o "$OUT/crtsh/${root}.json" 2>/dev/null || true
+    jq -r '.[].name_value' "$OUT/crtsh/${root}.json" 2>/dev/null \
+        | sed 's/\*\.//g' | tr 'A-Z' 'a-z' \
         | sort -u > "$OUT/crtsh/${root}.txt" || true
     COUNT=$(wc -l < "$OUT/crtsh/${root}.txt" 2>/dev/null || echo 0)
     echo "    $COUNT subdomains from certificates"
@@ -65,7 +67,7 @@ for root in $ROOTS; do
 done
 # Si el scope son hosts concretos (app-staging.x.com), consultar también el dominio registrable (x.com)
 # en crt.sh: es PASIVO (no toca el target) y descubre hermanos (*-staging) que luego filtra el scope-guard.
-PARENTS=$(for r in $ROOTS; do echo "$r" | awk -F. 'NF>2{print $(NF-1)"."$NF}'; done | sort -u)
+PARENTS=$(for r in $ROOTS; do python3 -c "import sys;sys.path.insert(0,'/app/intel');from common import registrable;print(registrable(sys.argv[1]))" "$r"; done | sort -u)
 for parent in $PARENTS; do
     echo "$ROOTS" | grep -qx "$parent" && continue
     echo "  → $parent (dominio registrable, pasivo)"
@@ -161,10 +163,19 @@ FAILED=$(grep -c FAILED "$STATUS" 2>/dev/null || echo 0)
 [ "$FAILED" -gt 0 ] && echo "  [!] $FAILED consultas históricas fallaron — ver merged/_sources-status.txt"
 echo ""
 
+# ---- Gate de tráfico activo: whatweb/wafw00f tocan el target. wafw00f envía payloads XSS/SQLi/LFI
+# para provocar al WAF → solo si el programa lo permite (programs/<p>.yaml: vps.passive_only / texto "no automation").
+ACTIVE_OK="yes"
+if [ -n "${PROGRAM_YAML:-}" ] && [ -f "$PROGRAM_YAML" ]; then
+    ACTIVE_OK=$(python3 -c "import sys;sys.path.insert(0,'/app/intel');from common import load_program,passive_only;p,_=load_program(sys.argv[1]);print('no' if passive_only(p) else 'yes')" "$PROGRAM_YAML" 2>/dev/null || echo no)
+fi
+[ "${ATALAYA_PASSIVE:-0}" = "1" ] && ACTIVE_OK="no"
+echo "[*] Tráfico activo (whatweb/wafw00f): $ACTIVE_OK"
+
 echo "══════════════════════════════════════════"
 echo " [6/8] WhatWeb (Technology Fingerprint)"
 echo "══════════════════════════════════════════"
-for root in $ROOTS; do
+[ "$ACTIVE_OK" = "yes" ] && for root in $ROOTS; do
     for proto in https http; do
         echo "  → ${proto}://${root}"
         whatweb --color=never -a 3 -U "$UA" -H "${IDENT_HEADER}:${HANDLE}" "${proto}://${root}" \
@@ -177,9 +188,10 @@ echo ""
 echo "══════════════════════════════════════════"
 echo " [7/8] wafw00f (WAF Detection)"
 echo "══════════════════════════════════════════"
-for root in $ROOTS; do
+[ "$ACTIVE_OK" = "yes" ] && [ "${WAFW00F_ALL:-0}" = "1" ] && WAFFLAG="-a" || WAFFLAG=""
+[ "$ACTIVE_OK" = "yes" ] && for root in $ROOTS; do
     echo "  → $root"
-    wafw00f -a "https://${root}" -H "$HDRS" -o "$OUT/wafw00f/${root}.json" -f json \
+    wafw00f $WAFFLAG "https://${root}" -H "$HDRS" -o "$OUT/wafw00f/${root}.json" -f json \
         2>/dev/null || true
 done
 echo ""
@@ -245,5 +257,11 @@ echo " Historical URLs: $HIST_COUNT"
 echo "   Interesting:   $INT_COUNT"
 echo "   Sensitive:     $SENS_COUNT"
 echo ""
-echo " Next: OSINTAgent processes this → briefing"
+echo ""
+echo "══════════════════════════════════════════"
+echo " [9/9] Intel — visión de bounty (pasivo)"
+echo "══════════════════════════════════════════"
+python3 /app/intel/run.py "$OUT" ${PROGRAM_YAML:+--program-yaml "$PROGRAM_YAML"} --scope-txt "$1" || echo "  [!] intel falló (los datos crudos siguen ahí)"
+# (sin symlink "latest": el host es Windows; el orquestador elige el último dir por nombre)
+echo " BRIEFING: $OUT/BRIEFING.md"
 echo "============================================"

@@ -4,10 +4,22 @@
 # ============================================================
 # Stage 1: compile Go tools (waybackurls, gau)
 # ============================================================
-FROM golang:1.22-bookworm AS go-builder
+FROM golang:1.24-bookworm AS go-builder
+# bbscope v2 exige Go >= 1.27: deja que go descargue el toolchain que pida cada módulo
+ENV GOTOOLCHAIN=auto
 
 RUN go install github.com/tomnomnom/waybackurls@latest && \
     go install github.com/lc/gau/v2/cmd/gau@latest
+
+# ---- Atalaya v3: análisis de JS, sourcemaps, GitHub y scope de plataformas (todo pasivo)
+RUN go install github.com/BishopFox/jsluice/cmd/jsluice@latest && \
+    go install github.com/denandz/sourcemapper@latest && \
+    go install github.com/gwen001/github-subdomains@latest && \
+    go install github.com/gwen001/github-endpoints@latest && \
+    go install github.com/sw33tLie/bbscope/v2@latest
+
+# ---- trufflehog (binario oficial)
+FROM trufflesecurity/trufflehog:latest AS trufflehog
 
 # ============================================================
 # Stage 2: main image
@@ -26,6 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---- Go binaries from builder ------------------------------
 COPY --from=go-builder /go/bin/waybackurls /usr/local/bin/waybackurls
 COPY --from=go-builder /go/bin/gau /usr/local/bin/gau
+COPY --from=go-builder /go/bin/jsluice /go/bin/sourcemapper /go/bin/github-subdomains /go/bin/github-endpoints /go/bin/bbscope /usr/local/bin/
+COPY --from=trufflehog /usr/bin/trufflehog /usr/local/bin/trufflehog
 
 # ---- whatweb (Ruby) ----------------------------------------
 RUN git clone --depth 1 https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb && \
@@ -49,8 +63,12 @@ RUN git clone --depth 1 https://github.com/laramies/theHarvester.git /opt/theHar
 # ---- Shodan CLI (optional, needs API key) ------------------
 RUN pip install --break-system-packages shodan
 
+# ---- intel (visión de bounty) ------------------------------
+RUN pip install --break-system-packages pyyaml requests porch-pirate
+
 # ---- app scripts -------------------------------------------
 COPY scripts/ /app/scripts/
+COPY intel/ /app/intel/
 RUN chmod +x /app/scripts/*.sh /app/scripts/*.py 2>/dev/null || true
 
 WORKDIR /app
