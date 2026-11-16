@@ -7,7 +7,7 @@ FROM atalaya-osint:latest
 
 # PyTorch solo-CPU (mucho más ligero que el de CUDA) + subwiz (modelo de IA local para predecir subdominios)
 RUN pip install --break-system-packages --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --break-system-packages --no-cache-dir subwiz semgrep
+    pip install --break-system-packages --no-cache-dir subwiz semgrep jsbeautifier
 
 # regulator (aprende patrones de nombres de host) + sus dependencias
 RUN git clone --depth 1 https://github.com/cramppet/regulator.git /opt/regulator && \

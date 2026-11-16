@@ -136,9 +136,67 @@ def explore_hosts(run_dir, out, scope, active_ok, max_per_tool=120, reverify=Fal
 
 # ------------------------------------------------------------------ sinks
 def _host_from_name(name):
-    """VIGÍA guarda 'https___host_ruta.js' → host."""
-    m = re.match(r"^https?___([^_]+)_", name)
+    """VIGÍA guarda 'https___host_ruta.js' → host (y 'gf_https___host_…' para los chunks de getfrontend)."""
+    m = re.match(r"^(?:gf_)?https?___([A-Za-z0-9.\-]+?)_", name)
     return m.group(1).lower() if m else ""
+
+
+# F1 (16-nov): el target sirve SU código desde un CDN (vendappcdn.*.fastly.net, d…cloudfront.net). No es tercero.
+CDN_RE = re.compile(r"(cloudfront\.net|fastly\.net|fastlylb\.net|akamaized\.net|akamaihd\.net|edgekey\.net|edgesuite\.net|"
+                    r"azureedge\.net|azurefd\.net|b-cdn\.net|cdn77|stackpathcdn|kxcdn|cloudflare-ipfs|r2\.dev|"
+                    r"googleusercontent\.com|storage\.googleapis\.com|amazonaws\.com)$", re.I)
+THIRD_PARTY_RE = re.compile(r"(google|gstatic|doubleclick|facebook|fbcdn|twitter|segment|sentry|datadog|newrelic|nr-data|hotjar|"
+                            r"intercom|zendesk|zdassets|stripe|paypal|cdnjs|jsdelivr|unpkg|jquery|youtube|vimeo|linkedin|tiktok|"
+                            r"snapchat|sc-static|optimizely|launchdarkly|amplitude|mixpanel|heap|fullstory|contentsquare|onetrust|"
+                            r"cookielaw|recaptcha|hcaptcha|polyfill|bootstrapcdn|fontawesome|typekit|adobe|braze|branch\.io|"
+                            r"appsflyer|statsig|raygun|transifex|clarity|bing|hubspot|hs-scripts|marketo|pardot|salesforce|"
+                            r"cloudflareinsights|cookiebot|trustarc|usercentrics|wistia|vwo|qualtrics|medallia|pendo|walkme)", re.I)
+
+
+def first_party_js_hosts(vigia_js, scope):
+    """Hosts de CDN que sirven JS a páginas IN-SCOPE del crawl de VIGÍA y no son terceros conocidos → código del target."""
+    hosts = set()
+    if not vigia_js:
+        return hosts
+    crawl = Path(vigia_js).parent.parent / "crawl"
+    for cf in (crawl.glob("*.json") if crawl.exists() else []):
+        try:
+            j = json.loads(cf.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        page_host = (re.match(r"https?://([^/:]+)", j.get("url", "")) or [None, ""])[1].lower()
+        if not scope or scope.status(page_host) not in ("in", "apex"):
+            continue
+        for u in (j.get("scripts") or []) + (j.get("resources") or []):
+            m = re.match(r"https?://([^/:]+)", u or "")
+            h = m.group(1).lower() if m else ""
+            if h and u.split("?")[0].endswith((".js", ".mjs")) and CDN_RE.search(h) and not THIRD_PARTY_RE.search(h):
+                hosts.add(h)
+    return hosts
+
+
+SMAP_SKIP = re.compile(r"(node_modules|transifex|webpack_bootstrap|webpack_runtime|\(webpack\)|polyfill|core-js|regenerator)", re.I)
+
+
+def beautify_cached(src: Path, dst: Path):
+    """Devuelve (fichero a analizar, 'desminificado'|'original'). Solo desminifica si está minificado (líneas largas)."""
+    if dst.exists() and dst.stat().st_size > 0:
+        return dst, "desminificado"
+    try:
+        txt = src.read_text(encoding="utf-8", errors="replace")
+        lines = txt.count("\n") + 1
+        if len(txt) > 3_000_000 or len(txt) / lines < 300:     # enorme, o ya legible
+            return src, "original"
+        import jsbeautifier
+        o = jsbeautifier.default_options(); o.indent_size = 2
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(jsbeautifier.beautify(txt, o), encoding="utf-8")
+        return dst, "desminificado"
+    except Exception:
+        return src, "original"
+
+
+TS_SRC = re.compile(r"\.(tsx|ts|jsx)\.js$")
 
 
 def prepare_js(run_dir, vigia_js, scope, work):
@@ -146,6 +204,7 @@ def prepare_js(run_dir, vigia_js, scope, work):
     JS de VIGÍA SOLO de hosts en scope (el resto son terceros: Microsoft, HubSpot, analítica…)."""
     work.mkdir(parents=True, exist_ok=True)
     n = {"sourcemaps": 0, "archived": 0, "vigia": 0, "vigia_terceros": 0}
+    names = {}                                      # copia en `work` -> fichero real en disco (para citar bien)
     sm = run_dir / "intel" / "sourcemaps"
     for f in (sm.rglob("*") if sm.exists() else []):
         if f.is_file() and "node_modules" not in f.parts and "_maps" not in f.parts and "jsluice" not in f.parts \
@@ -155,21 +214,65 @@ def prepare_js(run_dir, vigia_js, scope, work):
     ar = run_dir / "intel" / "archived-js" / "files"
     for f in (ar.iterdir() if ar.exists() else []):
         if f.is_file():
-            dst = work / "archived" / (f.name if f.name.endswith(".js") else f.name + ".js")
-            dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(f, dst); n["archived"] += 1
+            # F14: corridas antiguas guardaron JS comprimido leído como texto (ilegible): se salta
+            head = f.read_text(encoding="utf-8", errors="replace")[:4000]
+            if head.count("\ufffd") > 20:
+                n["archived_rotos"] = n.get("archived_rotos", 0) + 1; continue
+            dname = f.name if f.name.endswith(".js") else f.name + ".js"
+            # 9e: el JS archivado viene minificado (snippets de una línea gigante). Se desminifica UNA vez y se guarda
+            # en intel/archived-js/beautified/ para que la línea que se cite exista en disco.
+            use, copia = beautify_cached(f, ar.parent / "beautified" / f.name)
+            if copia == "desminificado":
+                n["archived_desminificados"] = n.get("archived_desminificados", 0) + 1
+            dst = work / "archived" / dname
+            dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(use, dst); n["archived"] += 1
+            names[f"archived/{dname}"] = {"fichero": str(use.relative_to(run_dir)), "copia": copia}
+    n.update({"vigia_cdn": 0, "vigia_smap": 0, "beautified": 0, "ts_original": 0})
     if vigia_js and Path(vigia_js).exists():
+        cdn_ok = first_party_js_hosts(vigia_js, scope)
+        if cdn_ok:
+            log(f"[sinks] CDN del target (sirven JS a páginas en scope, no son terceros): {', '.join(sorted(cdn_ok))}")
+        # F2: VIGÍA deja una copia desminificada de cada JS; semgrep va mucho mejor sobre ella (sin timeouts en bundles de 1 MB)
+        beaut = Path(vigia_js).parent / "js-analysis" / "beautified"
         for f in Path(vigia_js).iterdir():
             if not f.is_file():
                 continue
             h = _host_from_name(f.name)
-            if h and scope.status(h) in ("in", "apex") and f.stat().st_size < 6_000_000:
-                dst = work / "vigia" / (f.name if f.name.endswith(".js") else f.name + ".js")
-                dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(f, dst); n["vigia"] += 1
+            kind = None
+            if h and scope.status(h) in ("in", "apex"):
+                kind = "vigia"
+            elif h and h in cdn_ok:
+                kind = "vigia_cdn"
+            elif f.name.startswith("smap_") and not SMAP_SKIP.search(f.name):
+                kind = "vigia_smap"                    # fuente original reconstruido del sourcemap (sin minificar)
+            if kind and f.stat().st_size < 6_000_000:
+                # F13: fuentes TypeScript/JSX de sourcemaps (VIGÍA las guarda como <x>.tsx.js). Con extensión .js
+                # semgrep las lee como JavaScript y da error; y el desminificador las rompe (`<App />` -> `< App / >`).
+                # Ya vienen legibles: se usa el ORIGINAL con su extensión real.
+                m = TS_SRC.search(f.name)
+                if m:
+                    use, dname, copia = f, f.name[:-3], "original"
+                    n["ts_original"] += 1
+                else:
+                    src = beaut / f.name
+                    use = src if src.exists() and src.stat().st_size > 0 else f
+                    copia = "desminificado" if use is src else "original"
+                    if use is src:
+                        n["beautified"] += 1
+                    dname = f.name if f.name.endswith(".js") else f.name + ".js"
+                dst = work / "vigia" / dname
+                dst.parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(use, dst); n[kind] += 1
+                names[f"vigia/{dname}"] = {"fichero": f.name, "copia": copia}
             else:
                 n["vigia_terceros"] += 1
-    log(f"[sinks] JS a analizar: {n['sourcemaps']} de sourcemaps · {n['archived']} archivados · {n['vigia']} de VIGÍA en scope "
-        f"({n['vigia_terceros']} de terceros descartados)")
-    return n
+    log(f"[sinks] JS a analizar: {n['sourcemaps']} de sourcemaps · {n['archived']} archivados"
+        f"{' (' + str(n['archived_rotos']) + ' rotos de corridas antiguas, saltados)' if n.get('archived_rotos') else ''}"
+        f"{', ' + str(n['archived_desminificados']) + ' desminificados' if n.get('archived_desminificados') else ''} · "
+        f"{n['vigia']} de VIGÍA en scope · "
+        f"{n['vigia_cdn']} del CDN del target · {n['vigia_smap']} fuentes de sourcemaps ({n['beautified']} desminificados, "
+        f"{n['ts_original']} TypeScript/JSX en original) · "
+        f"{n['vigia_terceros']} de terceros/librerías descartados")
+    return n, names
 
 
 # Librerías de terceros: sus sinks/listeners no son del target (ej.: ShareThis, flashembed, zone.js…).
@@ -181,7 +284,7 @@ def explore_sinks(run_dir, out, vigia_js=None, scope=None):
     if not shutil.which("semgrep"):
         log("[sinks] semgrep no instalado"); return []
     work = Path(tempfile.mkdtemp(prefix="sg-"))
-    n = prepare_js(run_dir, vigia_js, scope, work)
+    n, names = prepare_js(run_dir, vigia_js, scope, work)
     html = 0
     for f in list(work.rglob("*")):
         try:
@@ -191,7 +294,7 @@ def explore_sinks(run_dir, out, vigia_js=None, scope=None):
             pass
     if html:
         log(f"[sinks] {html} ficheros eran HTML, no JS (archivados) → descartados")
-    if not sum(v for k, v in n.items() if k != "vigia_terceros"):
+    if not sum(v for k, v in n.items() if k not in ("vigia_terceros", "beautified")):
         log("[sinks] no hay JS que analizar (sourcemaps, archived-js o VIGÍA en scope)"); return []
     # Por tandas: un bundle enorme ya no tumba todo el análisis (OOM 15-nov con turbopack de Next.js).
     files = sorted(str(f) for f in work.rglob("*") if f.is_file())
@@ -201,7 +304,7 @@ def explore_sinks(run_dir, out, vigia_js=None, scope=None):
     for i in range(0, len(files), BATCH):
         chunk = files[i:i + BATCH]
         cmd = ["semgrep", "--config", str(RULES), "--json", "--metrics=off", "--quiet", "-j", "2",
-               "--timeout", "30", "--timeout-threshold", "2", "--max-memory", "2000",
+               "--timeout", os.environ.get("EXPLORE_SG_TIMEOUT", "120"), "--timeout-threshold", "3", "--max-memory", "3000",
                "--max-target-bytes", "3000000", "--no-git-ignore"] + chunk
         rc, so, se = run(cmd, timeout=900)
         try:
@@ -228,7 +331,11 @@ def explore_sinks(run_dir, out, vigia_js=None, scope=None):
             lines = []
         snippet = "\n".join(lines[max(0, l0 - 1):min(len(lines), l1, l0 + 2)])[:400]
         rule = r["check_id"].split(".")[-1]
-        item = {"rule": rule, "file": path.replace(str(work) + "/", ""), "line": l0,
+        rel = path.replace(str(work) + "/", "")
+        nm = names.get(rel)
+        if nm:                                       # citar el fichero real (VIGÍA js-raw/beautified o archived-js)
+            rel = ("vigia/" + nm["fichero"]) if rel.startswith("vigia/") else nm["fichero"]
+        item = {"rule": rule, "file": rel, "line": l0, **({"copia": nm["copia"]} if nm else {}),
                 "fuente": (r["extra"].get("metadata") or {}).get("fuente"), "snippet": snippet}
         if rule == "aegir-postmessage-listener":
             body = "\n".join(lines[l0 - 1:min(len(lines), l0 + 40)])

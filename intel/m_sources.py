@@ -1,6 +1,6 @@
 """Fuentes pasivas de terceros. Ninguna toca el target: crt.sh, DNS público, internetdb, urlscan, GitHub, Postman, archive.org.
 Cada fuente deja estado en sources-status (ok N / FAILED motivo) para no confundir 'caído' con 'vacío'."""
-import json, os, re, subprocess, time, urllib.parse, datetime as dt
+import gzip, json, os, re, subprocess, time, urllib.parse, zlib, datetime as dt
 from pathlib import Path
 from common import log, http, jget, wjson, wlines, rjson, rlines, host_of, registrable, HOST_RE
 
@@ -280,6 +280,25 @@ SECRETS = {
 HASHY = re.compile(r"[.\-~][0-9a-f]{6,}(?=\.)", re.I)
 
 
+def js_text(b: bytes):
+    """F14: archive.org a veces devuelve el JS tal cual se guardó, COMPRIMIDO (gzip/deflate). Leerlo como texto lo
+    destrozaba (1f 8b -> 1f ef bf bd). Se descomprime; si sigue sin ser texto (brotli u otro binario) -> None."""
+    if b[:2] == b"\x1f\x8b":
+        try:
+            b = gzip.decompress(b)
+        except Exception:
+            return None
+    elif b[:1] == b"\x78":                      # cabecera zlib (deflate)
+        try:
+            b = zlib.decompress(b)
+        except Exception:
+            pass
+    txt = b[:4_000_000].decode("utf-8", "replace")
+    if txt.count("\ufffd") > max(20, len(txt) // 200):
+        return None
+    return txt
+
+
 def archived_js(js_urls, scope, out_dir: Path, max_files=80, prio_hosts=None):
     """Descarga de archive.org (no del target) la última copia de JS distintos y extrae rutas/URLs/secretos."""
     prio_hosts = prio_hosts or set()
@@ -293,14 +312,16 @@ def archived_js(js_urls, scope, out_dir: Path, max_files=80, prio_hosts=None):
         seen.add(k); pick.append(u)
         if len(pick) >= max_files:
             break
-    eps, urls, secrets, ok, fail = set(), set(), [], 0, 0
+    eps, urls, secrets, ok, fail, binarios = set(), set(), [], 0, 0, 0
     cache = out_dir / "archived-js" / "files"
     for u in pick:
         s, b = http(f"https://web.archive.org/web/2id_/{u}", timeout=40, tries=2)
         if s != 200 or not b:
             fail += 1; continue
+        txt = js_text(b)
+        if txt is None:
+            binarios += 1; continue
         ok += 1
-        txt = b[:4_000_000].decode("utf-8", "replace")
         fn = re.sub(r"[^A-Za-z0-9._-]", "_", u.split("://", 1)[-1])[:150]
         (cache).mkdir(parents=True, exist_ok=True)
         (cache / fn).write_text(txt, encoding="utf-8")
@@ -319,5 +340,5 @@ def archived_js(js_urls, scope, out_dir: Path, max_files=80, prio_hosts=None):
     wlines(od / "endpoints.tsv", sorted(eps))
     wlines(od / "in-scope-urls.txt", sorted(urls))
     wjson(od / "secrets.json", secrets)
-    st("archived-js", ok > 0 or not pick, f"{ok}/{len(pick)} JS descargados de archive.org · {len(eps)} rutas · {len(urls)} URLs · {len(secrets)} posibles secretos")
+    st("archived-js", ok > 0 or not pick, f"{ok}/{len(pick)} JS descargados de archive.org{f' ({binarios} binarios/comprimidos descartados)' if binarios else ''} · {len(eps)} rutas · {len(urls)} URLs · {len(secrets)} posibles secretos")
     return sorted(eps), sorted(urls), secrets

@@ -134,8 +134,14 @@ fetch_hist() {
     done
     local count; count=$(wc -l < "$out" 2>/dev/null || echo 0)
     if [ $rc -eq 0 ]; then
-        echo "$root | $src | ok $count" >> "$STATUS"; rm -f "$err"
-        echo "    $count URLs ($src)"
+        if grep -q "TRUNCADO" "$err" 2>/dev/null; then
+            echo "$root | $src | ok $count $(grep -m1 TRUNCADO "$err" | cut -c1-160)" >> "$STATUS"
+            echo "    $count URLs ($src) — TRUNCADO: la fuente cortó en su tope; completado con consultas dirigidas"
+        else
+            echo "$root | $src | ok $count" >> "$STATUS"
+            echo "    $count URLs ($src)"
+        fi
+        rm -f "$err"
     else
         local why; why=$(tail -c 200 "$err" 2>/dev/null | tr '\n' ' '); [ $rc -eq 124 ] && why="timeout ${tmo}s $why"
         echo "$root | $src | FAILED rc=$rc ${why}" >> "$STATUS"
@@ -201,13 +207,27 @@ echo ""
 echo "══════════════════════════════════════════"
 echo " [8/8] theHarvester"
 echo "══════════════════════════════════════════"
+# Solo fuentes gratuitas y pasivas que existen en 4.11.1. NUNCA las de brechas/credenciales
+# (dehashed, haveibeenpwned, hudsonrock, leaklookup, intelx...): regla AEGIR.
+THV_SOURCES="${THV_SOURCES:-baidu,certspotter,commoncrawl,crtsh,duckduckgo,hackertarget,otx,rapiddns,robtex,subdomaincenter,thc,urlscan}"
 for root in $ROOTS; do
-    echo "  → $root (free sources only)"
-    cd /opt/theHarvester && python3 -m theHarvester \
-        -d "$root" \
-        -b anubis,baidu,bing,certspotter,crtsh,dnsdumpster,duckduckgo,hackertarget,rapiddns,subdomaincenter,urlscan \
-        -f "$OUT/theharvester/${root}" \
-        2>/dev/null || true
+    echo "  → $root (fuentes gratuitas y pasivas)"
+    log="$OUT/theharvester/${root}.log"
+    rc=0
+    # ".out": theHarvester corta el nombre por el último punto (app.example.com -> app.example.json); así queda <root>.json
+    ( cd "$OUT/theharvester" && timeout 900 theHarvester -d "$root" -b "$THV_SOURCES" -l 500 \
+        -f "$OUT/theharvester/${root}.out" ) > "$log" 2>&1 || rc=$?
+    n=$(python3 -c "import json,sys
+try: print(len(json.load(open(sys.argv[1])).get('hosts') or []))
+except Exception: print(-1)" "$OUT/theharvester/${root}.json" || echo -1)
+    if [ "$rc" -eq 0 ] && [ "$n" -ge 0 ]; then
+        echo "$root | theharvester | ok $n" >> "$STATUS"
+        echo "    $n hosts (theHarvester)"
+    else
+        why=$(grep -iE "error|exception|invalid" "$log" 2>/dev/null | tail -2 | tr '\n' ' ' | cut -c1-180 || true)
+        echo "$root | theharvester | FAILED rc=$rc ${why}" >> "$STATUS"
+        echo "    theHarvester FALLÓ (rc=$rc) — ver theharvester/${root}.log"
+    fi
 done
 echo ""
 
@@ -243,7 +263,13 @@ SENS_COUNT=$(wc -l < "$OUT/merged/sensitive-urls.txt" 2>/dev/null || echo 0)
 echo "  → $INT_COUNT interesting file extensions"
 echo "  → $SENS_COUNT sensitive path patterns"
 
-cat "$OUT"/crtsh/*.txt "$OUT"/theharvester/*.xml 2>/dev/null \
+# Hosts de theHarvester desde su JSON (campo "hosts", sin la IP); el XML traía también dominios de emails y terceros
+python3 -c "import json,glob
+for f in glob.glob('$OUT/theharvester/*.json'):
+    try:
+        for h in json.load(open(f)).get('hosts') or []: print(str(h).split(':')[0].strip().lower())
+    except Exception: pass" > "$OUT/theharvester/_hosts.txt" 2>/dev/null || true
+cat "$OUT"/crtsh/*.txt "$OUT"/theharvester/_hosts.txt 2>/dev/null \
     | grep -oP '[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}' \
     | sort -u > "$OUT/merged/all-subdomains.txt" 2>/dev/null || true
 SUB_COUNT=$(wc -l < "$OUT/merged/all-subdomains.txt" 2>/dev/null || echo 0)

@@ -55,10 +55,11 @@ RUN pip install --break-system-packages wafw00f
 RUN pip install --break-system-packages dnsrecon
 
 # ---- theHarvester (Python) ---------------------------------
-RUN git clone --depth 1 https://github.com/laramies/theHarvester.git /opt/theHarvester && \
-    cd /opt/theHarvester && \
-    pip install --break-system-packages -r requirements.txt 2>/dev/null || \
-    pip install --break-system-packages -e . 2>/dev/null || true
+# Fijado a 4.11.1: la rama main exige Python 3.14 y esta imagen es 3.12. Antes el fallo se tapaba con
+# "2>/dev/null || true" y theHarvester NUNCA llegó a instalarse (F3, 16-nov). Ahora, si falla, falla la construcción.
+RUN git clone --depth 1 --branch 4.11.1 https://github.com/laramies/theHarvester.git /opt/theHarvester && \
+    pip install --break-system-packages /opt/theHarvester && \
+    theHarvester -h > /dev/null
 
 # ---- Shodan CLI (optional, needs API key) ------------------
 RUN pip install --break-system-packages shodan

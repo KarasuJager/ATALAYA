@@ -161,6 +161,23 @@ def write(run, out, pname, prog, ponly, rows, final, new_hosts, fresh, hist, tko
         warn.append("Fuentes caídas (vacío ≠ sin datos): " + ", ".join(failed))
     if partial:
         warn.append("Fuentes con fallos parciales: " + ", ".join(partial))
+    # F6 (16-nov): estado de las fuentes del paso OSINT (Wayback, gau, theHarvester) — antes no se miraba aquí
+    hist_failed, hist_trunc = [], []
+    stf = Path(run) / "merged" / "_sources-status.txt"
+    for line in (stf.read_text(encoding="utf-8", errors="replace").splitlines() if stf.exists() else []):
+        parts = [x.strip() for x in line.split("|")]
+        if len(parts) < 3:
+            continue
+        h, src, st = parts[0], parts[1], parts[2]
+        if st.startswith("FAILED"):
+            hist_failed.append(f"{src} en `{h}`")
+        elif "TRUNCADO" in st:
+            n = (re.match(r"ok (\d+)", st) or [None, "?"])[1]
+            hist_trunc.append(f"{src} en `{h}` ({n} URLs, cortado en el tope)")
+    if hist_failed:
+        warn.append("Historial INCOMPLETO — fuentes caídas (vacío ≠ sin historial, no concluir nada): " + ", ".join(hist_failed))
+    if hist_trunc:
+        warn.append("Historial TRUNCADO — hay más de lo que vemos (se completó solo con parámetros, /api/ y .js): " + ", ".join(hist_trunc))
     if warn:
         L.append("## ⚠ Avisos\n" + "\n".join(f"- {w}" for w in warn) + "\n")
 

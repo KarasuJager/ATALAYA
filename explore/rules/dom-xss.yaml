@@ -40,6 +40,14 @@ rules:
             - pattern: window.location.href = $SINK
             - pattern: location.assign($SINK)
             - pattern: location.replace($SINK)
+            - pattern: window.location.replace($SINK)
+            - pattern: window.location.assign($SINK)
+            - pattern: document.location.href = $SINK
+            - pattern: document.location.replace($SINK)
+            - pattern: document.location.assign($SINK)
+            - pattern: window.location = $SINK
+            - pattern: document.location = $SINK
+            - pattern: location = $SINK
             - pattern: window.open($SINK, ...)
             - pattern: $EL.src = $SINK
             - pattern: $EL.href = $SINK
@@ -85,6 +93,21 @@ rules:
           - pattern-inside: |
               window.onmessage = function ($E) { ... }
           - pattern: $E.data
+      # jQuery (16-nov: X-Series usa $(window).one("message", …) y lee e.originalEvent.data)
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  $W.$ON("message", function ($E) { ... })
+              - pattern-inside: |
+                  $W.$ON("message", ($E) => { ... })
+              - pattern-inside: |
+                  $W.$ON("message", $E => { ... })
+          - metavariable-regex:
+              metavariable: $ON
+              regex: ^(on|one|bind)$
+          - pattern-either:
+              - pattern: $E.originalEvent.data
+              - pattern: $E.data
     pattern-sinks: *sinks
     pattern-sanitizers: *sanitizers
 
@@ -111,3 +134,6 @@ rules:
     pattern-either:
       - pattern: $W.addEventListener("message", ...)
       - pattern: window.onmessage = $F
+      - pattern: $W.on("message", ...)
+      - pattern: $W.one("message", ...)
+      - pattern: $W.bind("message", ...)
