@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# 18-nov: el script se monta en vivo desde la carpeta (docker-compose). Bash lo lee a trozos mientras corre: si se edita
+# durante una corrida, lee media linea y muere con codigo 2 (Vinted, 15-nov). Se ejecuta una COPIA: la corrida en marcha
+# no ve las ediciones y la siguiente coge la version nueva.
+if [ -z "${ATALAYA_COPIA:-}" ]; then
+    _copia=$(mktemp /tmp/osint-XXXXXX.sh) && cp "$0" "$_copia" && ATALAYA_COPIA=1 exec bash "$_copia" "$@"
+fi
 set -euo pipefail
 
 # ============================================================
