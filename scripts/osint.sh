@@ -125,7 +125,8 @@ fetch_hist() {
     local src="$1" root="$2" out="$3" tmo="$4" tries="$5"; shift 5
     local err="${out%.txt}.err" n=1 rc=1
     while [ $n -le "$tries" ]; do
-        echo "$root" | timeout "$tmo" "$@" > "$out" 2> "$err"; rc=$?
+        # 18-nov: con set -e, "cmd; rc=$?" mataba el script al primer fallo (archive.org caido) antes de reintentar
+        if echo "$root" | timeout "$tmo" "$@" > "$out" 2> "$err"; then rc=0; else rc=$?; fi
         # waybackurls/gau devuelven 0 aunque la fuente falle: 0 líneas + algo en stderr = fallo
         if [ $rc -eq 0 ] && [ ! -s "$out" ] && [ -s "$err" ]; then rc=99; fi
         [ $rc -eq 0 ] && break
